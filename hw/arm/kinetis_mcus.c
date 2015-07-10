@@ -6,6 +6,8 @@
  * This code is licensed under the GPL.
  */
 
+#include "hw/sysbus.h"
+
 #include "hw/arm/kinetis.h"
 #include "hw/arm/cortexm.h"
 
@@ -92,7 +94,14 @@ static cortex_m_core_info mkl03z32vfk4_core_info = {
 
 qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
 {
-    return cortex_m0p_core_init(&mkl03z32vfk4_core_info, machine);
+    // 64 entry Nested Vector Interrupt Controller table
+    qemu_irq *pic;
+
+    pic = cortex_m0p_core_init(&mkl03z32vfk4_core_info, machine);
+    // add LPUART0 to the appropriate place in virtual ram & to the correct NVIC IRQ
+    sysbus_create_simple("kllpuart", 0x40054000, pic[28]);
+
+    return pic;
 }
 
 /* ----- MKL25Z128VLK4 ----- */
