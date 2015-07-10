@@ -82,6 +82,19 @@ qemu_irq *mk60fn1m0vlq12_mcu_init(MachineState *machine)
     return cortex_m4_core_init(&mk60fn1m0vlq12_core_info, machine);
 }
 
+/* ----- MKL03Z32VFK4 ----- */
+static cortex_m_core_info mkl03z32vfk4_core_info = {
+    .device_name = "MKL03Z32VFK4",
+    .flash_size_kb = 128,
+    .sram_size_kb = 12, /* +4K SRAM_L */
+    .has_mpu = false,
+};
+
+qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
+{
+    return cortex_m0p_core_init(&mkl03z32vfk4_core_info, machine);
+}
+
 /* ----- MKL25Z128VLK4 ----- */
 static cortex_m_core_info mkl25z128vlk4_core_info = {
     .device_name = "MKL25Z128VLK4",
