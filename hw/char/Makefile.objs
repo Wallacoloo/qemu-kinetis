@@ -25,5 +25,6 @@ common-obj-$(CONFIG_LM32) += lm32_juart.o
 common-obj-$(CONFIG_LM32) += lm32_uart.o
 common-obj-$(CONFIG_MILKYMIST) += milkymist-uart.o
 common-obj-$(CONFIG_SCLPCONSOLE) += sclpconsole.o sclpconsole-lm.o
+common-obj-$(CONFIG_KINETIS) += kinetis_lpuart.o
 
 obj-$(CONFIG_VIRTIO) += virtio-serial-bus.o
