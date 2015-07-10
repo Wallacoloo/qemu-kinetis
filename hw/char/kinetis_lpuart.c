@@ -10,6 +10,16 @@
 #define TYPE_KLLPUART "kllpuart"
 #define KLLPUART(obj) OBJECT_CHECK(KLLPUARTState, (obj), TYPE_KLLPUART)
 
+// definitions for field locations inside the registers
+#define STAT_TDRE_SHIFT 23 // Transmit Data Register Empty Flag
+#define STAT_RDRF_SHIFT 21 // Receive Data Register Full Flag
+#define STAT_OR_SHIFT   19 // Receiver Overrun Flag
+
+#define CTRL_ORIE_SHIFT 27 // Overrun Interrupt Enable
+#define CTRL_TIE_SHIFT  23 // Transmit Interrupt Enable
+#define CTRL_RIE_SHIFT  21 // Receiver Interrupt Enable
+
+
 typedef struct KLLPUARTState {
     SysBusDevice parent_obj;
 
@@ -21,41 +31,38 @@ typedef struct KLLPUARTState {
     uint32_t DATA;
     uint32_t MATCH;
 
-    /*uint32_t readbuff;
-    uint32_t flags;
-    uint32_t lcr;
-    uint32_t rsr;
-    uint32_t cr;
-    uint32_t dmacr;
-    uint32_t int_enabled;
-    uint32_t int_level;
-    uint32_t read_fifo[16];
-    uint32_t ilpr;
-    uint32_t ibrd;
-    uint32_t fbrd;
-    uint32_t ifl;
-    int read_pos;
-    int read_count;
-    int read_trigger;*/
     CharDriverState *chr;
     qemu_irq irq;
 } KLLPUARTState;
 
-/*#define PL011_INT_TX 0x20
-#define PL011_INT_RX 0x10
 
-#define PL011_FLAG_TXFE 0x80
-#define PL011_FLAG_RXFF 0x40
-#define PL011_FLAG_TXFF 0x20
-#define PL011_FLAG_RXFE 0x10*/
-
-
-static void kllpuart_update(KLLPUARTState *s)
+static void writeMasked(uint32_t *dest, uint32_t mask, uint32_t value)
 {
-    uint32_t flags = 0;
+    // write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
+    *dest = (*dest & ~mask) | (value & mask);
+}
 
-    //flags = s->int_level & s->int_enabled;
-    qemu_set_irq(s->irq, flags != 0);
+static void setBit(uint32_t *dest, int bitIndex)
+{
+    // set the `bitIndex` bit of *dest to 1.
+    writeMasked(dest, 1 << bitIndex, 1 << bitIndex);
+}
+
+static void clrBit(uint32_t *dest, int bitIndex)
+{
+    // set the `bitIndex` bit of *dest to 0.
+    writeMasked(dest, 1 << bitIndex, 0 << bitIndex);
+}
+
+
+static void kllpuart_checkIrq(KLLPUARTState *s)
+{
+    // check if any of the flags which are configured to raise interrupts have been set.
+    bool isIrq = ((s->STAT & (1 << STAT_TDRE_SHIFT)) && (s->CTRL & (1 << CTRL_TIE_SHIFT))) ||
+                 ((s->STAT & (1 << STAT_RDRF_SHIFT)) && (s->CTRL & (1 << CTRL_RIE_SHIFT))) ||
+                 ((s->STAT & (1 << STAT_OR_SHIFT))   && (s->CTRL & (1 << CTRL_ORIE_SHIFT)));
+
+    qemu_set_irq(s->irq, isIrq);
 }
 
 static uint64_t kllpuart_read(void *opaque, hwaddr offset,
@@ -75,6 +82,9 @@ static uint64_t kllpuart_read(void *opaque, hwaddr offset,
     case 2: // CTRL register
         return s->CTRL;
     case 3: // DATA register
+        // reading the data register clears the Receive Data Register Full Flag
+        clrBit(&s->STAT, STAT_RDRF_SHIFT);
+        kllpuart_checkIrq(s);
         return s->DATA;
     case 4: // MATCH register
         return s->MATCH;
@@ -82,6 +92,7 @@ static uint64_t kllpuart_read(void *opaque, hwaddr offset,
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "kllpuart_read: Bad offset %x\n", (int)offset);
+        return 0;
     }
 }
 
@@ -91,20 +102,32 @@ static void kllpuart_write(void *opaque, hwaddr offset,
     // this function is called whenever the user program writes to a register
     //   inside the range of this peripheral.
     KLLPUARTState *s = (KLLPUARTState *)opaque;
-    unsigned char ch;
+    unsigned char ch = value;
+    uint32_t value32 = value;
 
     switch (offset >> 2)
     {
     case 0: // BAUD register
+        s->BAUD = value32;
         break;
     case 1: // STAT register
+        // only bits 29:25 can be written
+        writeMasked(&s->STAT, 0x3e000000, value32);
+        // TODO: some more bits are write-1-to-clear
         break;
     case 2: // CTRL register
+        s->CTRL = value32;
         break;
     case 3: // DATA register
-        ch = value;
+        // clear Transmit Data Register Empty Flag
+        clrBit(&s->STAT, STAT_TDRE_SHIFT);
+        kllpuart_checkIrq(s);
+        // write character to some serial device attached to QEMU (e.g. stdio)
         if (s->chr)
             qemu_chr_fe_write(s->chr, &ch, 1);
+        // set Transmit Data Register Empty Flag
+        setBit(&s->STAT, STAT_TDRE_SHIFT);
+        kllpuart_checkIrq(s);
         break;
     case 4: // MATCH register
         break;
@@ -117,13 +140,28 @@ static void kllpuart_write(void *opaque, hwaddr offset,
 
 static int kllpuart_can_receive(void *opaque)
 {
-    KLLPUARTState *s = (KLLPUARTState *)opaque;
-
     return true;
 }
 
 static void kllpuart_receive(void *opaque, const uint8_t *buf, int size)
 {
+    KLLPUARTState *s = (KLLPUARTState *)opaque;
+
+    if (s->STAT & (1 << STAT_RDRF_SHIFT))
+    {
+        // attempting to write a byte but the receive register is full
+        // therefore set the overrun flag
+        setBit(&s->STAT, STAT_OR_SHIFT);
+        kllpuart_checkIrq(s);
+    }
+    else
+    {
+        // copy the character to the receive register
+        writeMasked(&s->DATA, 0xFF, *buf);
+        // set the Receive Data Register Full Flag
+        setBit(&s->STAT, STAT_RDRF_SHIFT);
+        kllpuart_checkIrq(s);
+    }
 }
 
 static void kllpuart_event(void *opaque, int event)
@@ -159,6 +197,13 @@ static void kllpuart_init(Object *obj)
     memory_region_init_io(&s->iomem, OBJECT(s), &kllpuart_ops, s, "kllpuart", 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+
+    // register reset values
+    s->BAUD  = 0x0F000004;
+    s->STAT  = 0x00C00000;
+    s->CTRL  = 0x00000000;
+    s->DATA  = 0x00001000;
+    s->MATCH = 0x00000000;
 }
 
 static void kllpuart_realize(DeviceState *dev, Error **errp)
