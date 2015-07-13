@@ -90,8 +90,8 @@ qemu_irq *mk60fn1m0vlq12_mcu_init(MachineState *machine)
 /* ----- MKL03Z32VFK4 ----- */
 static cortex_m_core_info mkl03z32vfk4_core_info = {
     .device_name = "MKL03Z32VFK4",
-    .flash_size_kb = 128,
-    .sram_size_kb = 12, /* +4K SRAM_L */
+    .flash_size_kb = 32,
+    .sram_size_kb = 2, /* +0.5K SRAM_L */
     .has_mpu = false,
 };
 
@@ -101,8 +101,35 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     qemu_irq *pic;
 
     pic = cortex_m0p_core_init(&mkl03z32vfk4_core_info, machine);
+    // add the Bit Manipulation Engine components
+    // allocate memory region for BME: AND operation (SRAM_U)
+    sysbus_create_simple("klbme", 0x24000000, NULL);
+    // allocate memory region for BME: OR operation (SRAM_U)
+    sysbus_create_simple("klbme", 0x28000000, NULL);
+    // allocate memory region for BME: XOR operation (SRAM_U)
+    sysbus_create_simple("klbme", 0x2c000000, NULL);
+    // allocate memory region for BME: AND operation (Peripherals)
+    sysbus_create_simple("klbme", 0x44000000, NULL);
+    // allocate memory region for BME: OR operation (Peripherals)
+    sysbus_create_simple("klbme", 0x48000000, NULL);
+    // allocate memory region for BME: XOR operation (Peripherals)
+    sysbus_create_simple("klbme", 0x4c000000, NULL);
+    //
+    // allocate memory map for BME: Load-and-clear 1 bit (SRAM_U)
+    sysbus_create_simple("klbme", 0x30000000, NULL);
+    sysbus_create_simple("klbme", 0x34000000, NULL);
+    sysbus_create_simple("klbme", 0x38000000, NULL);
+    sysbus_create_simple("klbme", 0x3C000000, NULL);
+    // allocate memory map for BME: Load-and-clear 1 bit (Peripherals)
+    sysbus_create_simple("klbme", 0x50000000, NULL);
+    sysbus_create_simple("klbme", 0x54000000, NULL);
+    sysbus_create_simple("klbme", 0x58000000, NULL);
+    sysbus_create_simple("klbme", 0x5C000000, NULL);
+    //
+    //
     // add LPUART0 to the appropriate place in virtual ram & to the correct NVIC IRQ
-    sysbus_create_simple("kllpuart", 0x40054000, pic[28]);
+    // IRQ is numberd 28 in absolute table, but subtract 16 to get the external IRQ location
+    sysbus_create_simple("kllpuart", 0x40054000, pic[12]);
 
     return pic;
 }
