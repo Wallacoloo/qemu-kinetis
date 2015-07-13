@@ -125,12 +125,14 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     sysbus_create_simple("klbme", 0x54000000, NULL);
     sysbus_create_simple("klbme", 0x58000000, NULL);
     sysbus_create_simple("klbme", 0x5C000000, NULL);
-    //
-    //
-    // add LPUART0 to the appropriate place in virtual ram & to the correct NVIC IRQ
+
+    // add LPUART0 to the appropriate place in physical ram & to the correct NVIC IRQ
     // IRQ is numberd 28 in absolute table, but subtract 16 to get the external IRQ location
     sysbus_create_simple("kllpuart", 0x40054000, pic[12]);
 
+    // add LPTMR0 to physical ram & NVIC IRQ
+    // IRQ is 44 in absolute table; 28 in external IRQ
+    sysbus_create_simple("kllptmr", 0x40040000, pic[28]);
     return pic;
 }
 
