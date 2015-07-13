@@ -88,7 +88,8 @@ qemu_irq *mk60fn1m0vlq12_mcu_init(MachineState *machine)
 static cortex_m_core_info mkl03z32vfk4_core_info = {
     .device_name = "MKL03Z32VFK4",
     .flash_size_kb = 32,
-    .sram_size_kb = 2, /* +0.5K SRAM_L */
+    .sram_size_kb = 2, /* including the 0.5K SRAM_L */
+    .sram_begin = 0x1FFFFE00,
     .has_mpu = false,
 };
 

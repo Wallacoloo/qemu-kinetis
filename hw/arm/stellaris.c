@@ -1230,7 +1230,7 @@ static void stellaris_init(MachineState *machine,
     }
 #endif
 
-    pic = armv7m_init(get_system_memory(), flash_size, sram_size, machine);
+    pic = armv7m_init(get_system_memory(), flash_size, sram_size, 0x20000000, machine);
 
     if (board->dc1 & (1 << 16)) {
         dev = sysbus_create_varargs(TYPE_STELLARIS_ADC, 0x40038000,

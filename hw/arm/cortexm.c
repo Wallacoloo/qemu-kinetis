@@ -18,6 +18,7 @@ qemu_irq *cortex_m_core_init(cortex_m_core_info *cm_info, MachineState *machine)
 {
     int flash_size_kb = cm_info->flash_size_kb;
     int sram_size_kb = cm_info->sram_size_kb;
+    int sram_begin = cm_info->sram_begin ? cm_info->sram_begin : 0x20000000;
     
 #if defined(CONFIG_VERBOSE)
     if (verbosity_level > 0) {
@@ -57,7 +58,7 @@ qemu_irq *cortex_m_core_init(cortex_m_core_info *cm_info, MachineState *machine)
         system_memory = get_system_memory();
     }
     qemu_irq *pic;
-    pic = armv7m_init(system_memory, flash_size_kb, sram_size_kb, machine);
+    pic = armv7m_init(system_memory, flash_size_kb, sram_size_kb, sram_begin, machine);
     
     /* Assume 8000000 Hz */
     /* TODO: compute according to board clock & pll settings */

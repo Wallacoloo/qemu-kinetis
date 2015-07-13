@@ -172,7 +172,7 @@ static void armv7m_reset(void *opaque)
    Returns the NVIC array.  */
 
 qemu_irq *armv7m_init(MemoryRegion *system_memory,
-                      int flash_size, int sram_size,
+                      int flash_size, int sram_size, int sram_begin,
                       MachineState *machine)
 {
     ARMCPU *cpu;
@@ -226,7 +226,7 @@ qemu_irq *armv7m_init(MemoryRegion *system_memory,
     memory_region_add_subregion(system_memory, 0, flash);
     memory_region_init_ram(sram, NULL, "armv7m.sram", sram_size, &error_abort);
     vmstate_register_ram_global(sram);
-    memory_region_add_subregion(system_memory, 0x20000000, sram);
+    memory_region_add_subregion(system_memory, sram_begin, sram);
     armv7m_bitband_init();
 
     nvic = qdev_create(NULL, "armv7m_nvic");
