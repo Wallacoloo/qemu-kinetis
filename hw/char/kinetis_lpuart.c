@@ -36,6 +36,9 @@ typedef struct KLLPUARTState {
 } KLLPUARTState;
 
 
+static void kllpuart_receive(void *opaque, const uint8_t *buf, int size);
+
+
 static void writeMasked(uint32_t *dest, uint32_t mask, uint32_t value)
 {
     // write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
@@ -117,6 +120,8 @@ static void kllpuart_write(void *opaque, hwaddr offset,
         break;
     case 2: // CTRL register
         s->CTRL = value32;
+        // altering the IRQ mask could cause a previously masked pending IRQ to now be unmasked
+        kllpuart_checkIrq(s);
         break;
     case 3: // DATA register
         // clear Transmit Data Register Empty Flag
