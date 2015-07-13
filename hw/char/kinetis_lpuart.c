@@ -1,5 +1,7 @@
 /*
- * Low-Power UART found in the kinetis KL series
+ * Low-Power UART found in the kinetis KL series.
+ *
+ * Authored by Colin Wallace <wallace.colin.a@gmail.com>
  *
  * This code is regrettably licensed under the GPL.
  */
