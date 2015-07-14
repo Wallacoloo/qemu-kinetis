@@ -40,29 +40,30 @@ typedef struct KLLPUARTState {
 
 static void kllpuart_receive(void *opaque, const uint8_t *buf, int size);
 
-
-static void writeMasked(uint32_t *dest, uint32_t mask, uint32_t value)
+// write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
+static void write_masked(uint32_t *dest, uint32_t mask, uint32_t value)
 {
-    // write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
     *dest = (*dest & ~mask) | (value & mask);
 }
 
-static void setBit(uint32_t *dest, int bitIndex)
+// "overloads" of the functions in qemu/bitops.h for u32 types
+// set the `bit_idx` bit of *dest to 1.
+static void set_bit_u32(int bit_idx, uint32_t *dest)
 {
-    // set the `bitIndex` bit of *dest to 1.
-    writeMasked(dest, 1 << bitIndex, 1 << bitIndex);
+    write_masked(dest, 1 << bit_idx, 1 << bit_idx);
 }
 
-static void clrBit(uint32_t *dest, int bitIndex)
+// set the `bit_idx` bit of *dest to 0.
+static void clear_bit_u32(int bit_idx, uint32_t *dest)
 {
-    // set the `bitIndex` bit of *dest to 0.
-    writeMasked(dest, 1 << bitIndex, 0 << bitIndex);
+    write_masked(dest, 1 << bit_idx, 0 << bit_idx);
 }
 
 
-static void kllpuart_checkIrq(KLLPUARTState *s)
+// check if any of the flags which are configured to raise interrupts have been set.
+// trigger NVIC if so
+static void kllpuart_check_irq(KLLPUARTState *s)
 {
-    // check if any of the flags which are configured to raise interrupts have been set.
     bool isIrq = ((s->STAT & (1 << STAT_TDRE_SHIFT)) && (s->CTRL & (1 << CTRL_TIE_SHIFT))) ||
                  ((s->STAT & (1 << STAT_RDRF_SHIFT)) && (s->CTRL & (1 << CTRL_RIE_SHIFT))) ||
                  ((s->STAT & (1 << STAT_OR_SHIFT))   && (s->CTRL & (1 << CTRL_ORIE_SHIFT)));
@@ -70,12 +71,12 @@ static void kllpuart_checkIrq(KLLPUARTState *s)
     qemu_set_irq(s->irq, isIrq);
 }
 
+// this function is called whenever the user program reads from a register
+//   inside the range of this peripheral.
+// this can trigger things like the clearing of IRQs, etc.
 static uint64_t kllpuart_read(void *opaque, hwaddr offset,
                            unsigned size)
 {
-    // this function is called whenever the user program reads from a register
-    //   inside the range of this peripheral.
-    // this can trigger things like the clearing of IRQs, etc.
     KLLPUARTState *s = (KLLPUARTState *)opaque;
 
     switch (offset >> 2)
@@ -88,8 +89,8 @@ static uint64_t kllpuart_read(void *opaque, hwaddr offset,
         return s->CTRL;
     case 3: // DATA register
         // reading the data register clears the Receive Data Register Full Flag
-        clrBit(&s->STAT, STAT_RDRF_SHIFT);
-        kllpuart_checkIrq(s);
+        clear_bit_u32(STAT_RDRF_SHIFT, &s->STAT);
+        kllpuart_check_irq(s);
         return s->DATA;
     case 4: // MATCH register
         return s->MATCH;
@@ -117,24 +118,24 @@ static void kllpuart_write(void *opaque, hwaddr offset,
         break;
     case 1: // STAT register
         // only bits 29:25 can be written
-        writeMasked(&s->STAT, 0x3e000000, value32);
+        write_masked(&s->STAT, 0x3e000000, value32);
         // TODO: some more bits are write-1-to-clear
         break;
     case 2: // CTRL register
         s->CTRL = value32;
         // altering the IRQ mask could cause a previously masked pending IRQ to now be unmasked
-        kllpuart_checkIrq(s);
+        kllpuart_check_irq(s);
         break;
     case 3: // DATA register
         // clear Transmit Data Register Empty Flag
-        clrBit(&s->STAT, STAT_TDRE_SHIFT);
-        kllpuart_checkIrq(s);
+        clear_bit_u32(STAT_TDRE_SHIFT, &s->STAT);
+        kllpuart_check_irq(s);
         // write character to some serial device attached to QEMU (e.g. stdio)
         if (s->chr)
             qemu_chr_fe_write(s->chr, &ch, 1);
         // set Transmit Data Register Empty Flag
-        setBit(&s->STAT, STAT_TDRE_SHIFT);
-        kllpuart_checkIrq(s);
+        set_bit_u32(STAT_TDRE_SHIFT, &s->STAT);
+        kllpuart_check_irq(s);
         break;
     case 4: // MATCH register
         break;
@@ -158,22 +159,21 @@ static void kllpuart_receive(void *opaque, const uint8_t *buf, int size)
     {
         // attempting to write a byte but the receive register is full
         // therefore set the overrun flag
-        setBit(&s->STAT, STAT_OR_SHIFT);
-        kllpuart_checkIrq(s);
+        set_bit_u32(STAT_OR_SHIFT, &s->STAT);
+        kllpuart_check_irq(s);
     }
     else
     {
         // copy the character to the receive register
-        writeMasked(&s->DATA, 0xFF, *buf);
+        write_masked(&s->DATA, 0xFF, *buf);
         // set the Receive Data Register Full Flag
-        setBit(&s->STAT, STAT_RDRF_SHIFT);
-        kllpuart_checkIrq(s);
+        set_bit_u32(STAT_RDRF_SHIFT, &s->STAT);
+        kllpuart_check_irq(s);
     }
 }
 
 static void kllpuart_event(void *opaque, int event)
 {
-    //if (event == CHR_EVENT_BREAK)
 }
 
 static const MemoryRegionOps kllpuart_ops = {
@@ -215,7 +215,7 @@ static void kllpuart_init(Object *obj)
 
 static void kllpuart_realize(DeviceState *dev, Error **errp)
 {
-    // connect the UART to whatever external serial device qemu is configured with (?)
+    // connect the UART to whatever external serial device qemu is configured with
     KLLPUARTState *s = KLLPUART(dev);
 
     s->chr = qemu_char_get_next_serial();
