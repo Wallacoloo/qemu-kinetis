@@ -64,11 +64,11 @@ static void clear_bit_u32(int bit_idx, uint32_t *dest)
 // trigger NVIC if so
 static void kllpuart_check_irq(KLLPUARTState *s)
 {
-    bool isIrq = ((s->STAT & (1 << STAT_TDRE_SHIFT)) && (s->CTRL & (1 << CTRL_TIE_SHIFT))) ||
+    bool is_irq = ((s->STAT & (1 << STAT_TDRE_SHIFT)) && (s->CTRL & (1 << CTRL_TIE_SHIFT))) ||
                  ((s->STAT & (1 << STAT_RDRF_SHIFT)) && (s->CTRL & (1 << CTRL_RIE_SHIFT))) ||
                  ((s->STAT & (1 << STAT_OR_SHIFT))   && (s->CTRL & (1 << CTRL_ORIE_SHIFT)));
 
-    qemu_set_irq(s->irq, isIrq);
+    qemu_set_irq(s->irq, is_irq);
 }
 
 // this function is called whenever the user program reads from a register
@@ -183,7 +183,7 @@ static const MemoryRegionOps kllpuart_ops = {
 };
 
 static const VMStateDescription vmstate_kllpuart = {
-    .name = "kllpuart",
+    .name = TYPE_KLLPUART,
     .version_id = 2,
     .minimum_version_id = 2,
     .fields = (VMStateField[]) {
@@ -201,7 +201,7 @@ static void kllpuart_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     KLLPUARTState *s = KLLPUART(obj);
 
-    memory_region_init_io(&s->iomem, OBJECT(s), &kllpuart_ops, s, "kllpuart", 0x1000);
+    memory_region_init_io(&s->iomem, OBJECT(s), &kllpuart_ops, s, TYPE_KLLPUART, 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 
