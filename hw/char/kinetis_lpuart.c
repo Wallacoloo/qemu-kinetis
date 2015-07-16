@@ -129,15 +129,19 @@ static void kllpuart_write(void *opaque, hwaddr offset,
         kllpuart_check_irq(s);
         break;
     case 3: // DATA register
-        // clear Transmit Data Register Empty Flag
-        clear_bit_u32(STAT_TDRE_SHIFT, &s->STAT);
-        kllpuart_check_irq(s);
-        // write character to some serial device attached to QEMU (e.g. stdio)
-        if (s->chr)
-            qemu_chr_fe_write(s->chr, &ch, 1);
-        // set Transmit Data Register Empty Flag
-        set_bit_u32(STAT_TDRE_SHIFT, &s->STAT);
-        kllpuart_check_irq(s);
+        // only pump data through the UART if the Transmitter Enabled flag has been set
+        if (s->CTRL & BIT(CTRL_TE_SHIFT))
+        {
+            // clear Transmit Data Register Empty Flag
+            clear_bit_u32(STAT_TDRE_SHIFT, &s->STAT);
+            kllpuart_check_irq(s);
+            // write character to some serial device attached to QEMU (e.g. stdio)
+            if (s->chr)
+                qemu_chr_fe_write(s->chr, &ch, 1);
+            // set Transmit Data Register Empty Flag
+            set_bit_u32(STAT_TDRE_SHIFT, &s->STAT);
+            kllpuart_check_irq(s);
+        }
         break;
     case 4: // MATCH register
         break;
