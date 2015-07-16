@@ -20,6 +20,8 @@
 #define CTRL_ORIE_SHIFT 27 // Overrun Interrupt Enable
 #define CTRL_TIE_SHIFT  23 // Transmit Interrupt Enable
 #define CTRL_RIE_SHIFT  21 // Receiver Interrupt Enable
+#define CTRL_TE_SHIFT   19 // Transmitter Enable
+#define CTRL_RE_SHIFT   18 // Receiver Enabled
 
 
 typedef struct KLLPUARTState {
@@ -148,14 +150,19 @@ static void kllpuart_write(void *opaque, hwaddr offset,
 
 static int kllpuart_can_receive(void *opaque)
 {
-    return true;
+    KLLPUARTState *s = (KLLPUARTState *)opaque;
+
+    // TODO: follow baud settings
+    bool recv_enable = (s->CTRL & BIT(CTRL_RE_SHIFT)) != 0;
+    bool recv_full = (s->STAT & BIT(STAT_RDRF_SHIFT)) != 0;
+    return recv_enable && !recv_full;
 }
 
 static void kllpuart_receive(void *opaque, const uint8_t *buf, int size)
 {
     KLLPUARTState *s = (KLLPUARTState *)opaque;
 
-    if (s->STAT & (1 << STAT_RDRF_SHIFT))
+    if (s->STAT & BIT(STAT_RDRF_SHIFT))
     {
         // attempting to write a byte but the receive register is full
         // therefore set the overrun flag
