@@ -137,6 +137,10 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     sysbus_create_simple("klport", 0x40049000, pic[30]);
     sysbus_create_simple("klport", 0x4004A000, pic[31]);
     sysbus_create_simple("klgpio", 0x400FF000, NULL);
+
+    // add TPMs (Timer/PWM Modules)
+    sysbus_create_simple("kltpm", 0x40038000, NULL);
+    sysbus_create_simple("kltpm", 0x40039000, NULL);
     return pic;
 }
 
