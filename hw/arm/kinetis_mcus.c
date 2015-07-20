@@ -133,8 +133,10 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     sysbus_create_simple("kllptmr", 0x40040000, pic[28]);
 
     // add GPIOs (both PORT and GPIO control)
-    // IRSs are 62 and 63 in absolute table; 46 and 47 external IRQ
-    sysbus_create_varargs("klgpio", 0x40049000, pic[46], pic[47], NULL);
+    // IRSs are 46 and 46 in absolute table; 30 and 31 external IRQ
+    sysbus_create_simple("klport", 0x40049000, pic[30]);
+    sysbus_create_simple("klport", 0x4004A000, pic[31]);
+    sysbus_create_simple("klgpio", 0x400FF000, NULL);
     return pic;
 }
 
