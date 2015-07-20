@@ -12,16 +12,24 @@
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 
+#define NUM_PORTS 2
+
 #define TYPE_KLGPIO "klgpio"
 #define KLGPIO(obj) OBJECT_CHECK(KLGPIOState, (obj), TYPE_KLGPIO)
 
-#define NUM_PORTS 2
+#define TYPE_KLPORT "klport"
+#define KLPORT(obj) OBJECT_CHECK(KLPORTState, (obj), TYPE_KLPORT)
+
 #define PORT_PCR_ISF_SHIFT 24 // Interrupt Status Flag bit index
 #define PORT_PCR_IRQC_SHIFT 16 // Interrupt Configuration bits
 #define PORT_PCR_IRQC_WIDTH 4
 
 
-typedef struct KLPORTEntry {
+typedef struct KLPORTState {
+    SysBusDevice parent_obj;
+
+    MemoryRegion iomem;
+
     // device registers (publicly readable/writeable)
     uint32_t PCR[32];
     //uint32_t PORT_GPCLR; // write-only
@@ -31,10 +39,10 @@ typedef struct KLPORTEntry {
 
     // private variables
     qemu_irq irq;
-} KLPORTEntry;
+    uint32_t last_known_pdir; // last known input value of the pin - used to detect edge interrupts
+} KLPORTState;
 
-typedef struct KLGPIOEntry {
-    // device registers (publicly readable/writeable)
+typedef struct KLGPIOBank {
     uint32_t PDOR; // Port Data Output Register
     //uint32_t PSOR; // Port Set Output Register (write-only)
     //uint32_t PCOR; // Port Clear Output Register (write-only)
@@ -44,18 +52,17 @@ typedef struct KLGPIOEntry {
     // doesn't appear to be any documented way to connect a gpio to a 
     // source external to qemu, and this allows to do so by using a debugger
     uint32_t PDDR; // Port Data Direction Register
-} KLGPIOEntry;
+} KLGPIOBank;
 
 typedef struct KLGPIOState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
-    KLPORTEntry ports[NUM_PORTS];
-    KLGPIOEntry gpios[NUM_PORTS];
+
+    // device registers (publicly readable/writeable)
+    KLGPIOBank banks[NUM_PORTS];
 } KLGPIOState;
 
-
-static void klgpioentry_set_io_vals(KLGPIOState *s, int port_id, uint32_t pdor, uint32_t pdir);
 
 
 // write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
@@ -77,22 +84,54 @@ static uint32_t write1clear(uint32_t *reg, uint32_t mask, uint32_t write_val)
     return write_masked(reg, mask & write_val, 0);
 }
 
+
 // check if any of the flags which are configured to raise interrupts have been set.
 // trigger NVIC if so
-static void klportentry_check_irq(KLPORTEntry *s)
+static void klport_check_irq(KLPORTState *port)
 {
+    // need to read the Port Data Input register under the GPIO peripheral
+    //   (not the PORT peripheral) to determine IRQ states
+    uint32_t new_pdir;
+    uint32_t periph_base_addr = port->parent_obj.mmio[0].addr;
+    uint32_t port_number = (periph_base_addr-0x40049000) / 0x1000;
+    uint32_t gpio_base_addr = 0x400FF000 + 0x40*port_number;
+    uint32_t gpio_pdir_addr = gpio_base_addr+0x10;
+    cpu_physical_memory_read(gpio_pdir_addr, &new_pdir, 4);
+
+    uint32_t rising_edges = (~port->last_known_pdir) & new_pdir;
+    uint32_t falling_edges = port->last_known_pdir & (~new_pdir);
+
+    port->last_known_pdir = new_pdir;
+
+    // update the individual Interrupt Status Flag for each pin
+    int pin;
+    for (pin=0; pin<32; ++pin)
+    {
+        bool rising = (rising_edges & BIT(pin)) != 0;
+        bool falling = (falling_edges & BIT(pin)) != 0;
+        bool logic_high = (new_pdir & BIT(pin)) != 0;
+        bool logic_low = !logic_high;
+        uint32_t IRQC_field = (port->PCR[pin] >> PORT_PCR_IRQC_SHIFT) & ((1 << PORT_PCR_IRQC_WIDTH)-1);
+        bool is_new_irq = (IRQC_field == 0x8 && logic_low)
+                       || (IRQC_field == 0x9 && rising)
+                       || (IRQC_field == 0xA && falling)
+                       || (IRQC_field == 0xB && (rising || falling))
+                       || (IRQC_field == 0xC && logic_high);
+        port->PCR[pin] |= is_new_irq << PORT_PCR_ISF_SHIFT;
+    }
+
+    // determine if there's at least one IRQ on the port; relay to NVIC
     bool is_irq = false;
-	int p;
-	for (p=0; p<32; ++p)
+	for (pin=0; pin<32; ++pin)
 	{
-	    is_irq |= (s->PCR[p] & BIT(PORT_PCR_ISF_SHIFT)) != 0;
+	    is_irq |= (port->PCR[pin] & BIT(PORT_PCR_ISF_SHIFT)) != 0;
 	}
-    qemu_set_irq(s->irq, is_irq);
+    qemu_set_irq(port->irq, is_irq);
 }
 
-static uint64_t klportentry_read(KLGPIOState *s, int port_id, hwaddr offset, unsigned size)
+static uint64_t klport_read(void *opaque, hwaddr offset, unsigned size)
 {
-    KLPORTEntry *port = &s->ports[port_id];
+    KLPORTState *port = (KLPORTState*)opaque;
     switch (offset >> 2) {
     	case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: 
     	case 8: case 9: case 10: case 11: case 12: case 13: case 14: case 15: 
@@ -106,6 +145,9 @@ static uint64_t klportentry_read(KLGPIOState *s, int port_id, hwaddr offset, uns
     	// [34-39 are unmapped]
     	case 40: // PORT_ISFR - Interrupt Status Flag Reg
     		{
+                // reading the ISFR is a way that the GPIO peripheral notifies us of a pin input change,
+                // so recalculate the IRQs
+                klport_check_irq(port);
     			// construct the ISFR value by reading all the Pins' Interrupt Status Flags
     			uint32_t ISFR = 0x00000000;
     			int p;
@@ -118,16 +160,15 @@ static uint64_t klportentry_read(KLGPIOState *s, int port_id, hwaddr offset, uns
     		}
     	default:
     		qemu_log_mask(LOG_GUEST_ERROR,
-                      "klportentry_read: Bad offset 0x%x\n", (int)offset);
+                      "klport_read: Bad offset 0x%x\n", (int)offset);
     		break;
     }
     return 0xDEADBEEF;
 }
 
-static void klportentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64_t value, unsigned size)
+static void klport_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 {
-    KLPORTEntry *port = &s->ports[port_id];
-    KLGPIOEntry *gpio = &s->gpios[port_id];
+    KLPORTState *port = (KLPORTState*)opaque;
     uint32_t value32 = value;
 
     switch (offset >> 2) {
@@ -137,10 +178,7 @@ static void klportentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64
     	case 24: case 25: case 26: case 27: case 28: case 29: case 30: case 31: // PORT_PCRn
     		write1clear(&port->PCR[offset >> 2], BIT(PORT_PCR_ISF_SHIFT), value32);
     		port->PCR[offset >> 2] = value32 & 0x000F0757;
-    		klportentry_check_irq(port);
-            // Clearing the flag should cause it to retrigger if IRQ set for logic 0/1
-            //   & pin has the same value:
-            klgpioentry_set_io_vals(s, port_id, gpio->PDOR, gpio->PDIR);
+    		klport_check_irq(port);
     		break;
     	case 32: // PORT_GPCLR - Global Pin Control Low Reg
             {
@@ -153,7 +191,7 @@ static void klportentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64
                     if (pin_mask & BIT(pin))
                     {
                         uint32_t new_value = (port->PCR[pin] & 0xFFFF0000) | write_data;
-                        klportentry_write(s, port_id, pin*4, new_value, 4);
+                        klport_write(port, pin*4, new_value, 4);
                     }
                 }
             }
@@ -169,11 +207,10 @@ static void klportentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64
                     if (pin_mask & BIT(pin))
                     {
                         uint32_t new_value = (port->PCR[pin] & 0x0000FFFF) | (write_data << 16);
-                        klportentry_write(s, port_id, pin*4, new_value, 4);
+                        klport_write(port, pin*4, new_value, 4);
                     }
                 }
             }
-            break;
     		break;
     	// [34-39 are unmapped]
     	case 40: // PORT_ISFR - Interrupt Status Flags Reg
@@ -182,13 +219,11 @@ static void klportentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64
 	    		for (p=0; p<32; ++p)
 	    		{
 	    			bool do_clear = (value32 & BIT(p)) != 0;
-	    			write1clear(&port->PCR[p], BIT(PORT_PCR_ISF_SHIFT), BIT(do_clear));
+	    			write1clear(&port->PCR[p], BIT(PORT_PCR_ISF_SHIFT), do_clear << PORT_PCR_ISF_SHIFT);
 	    		}
 	    	}
     		// Some IRQs may have just been cleared
-    		// Clearing the flag should cause it to retrigger if IRQ set for logic 0/1
-            //   & pin has the same value:
-            klgpioentry_set_io_vals(s, port_id, gpio->PDOR, gpio->PDIR);
+            klport_check_irq(port);
     		break;
     	default:
     		qemu_log_mask(LOG_GUEST_ERROR,
@@ -198,50 +233,22 @@ static void klportentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64
 }
 
 
-
-static void klgpioentry_set_io_vals(KLGPIOState *s, int port_id, uint32_t pdor, uint32_t pdir)
+static uint64_t klgpio_read(void *opaque, hwaddr offset, unsigned size)
 {
-    // calculate bitmasks of pins that just experiences rising/falling edges
-    KLGPIOEntry *gpio = &s->gpios[port_id];
-    KLPORTEntry *port = &s->ports[port_id];
-    uint32_t rising_edges = (~gpio->PDIR) & pdir;
-    uint32_t falling_edges = gpio->PDIR & (~pdir);
-
-    int pin;
-    for (pin=0; pin<32; ++pin)
-    {
-        bool rising = (rising_edges & BIT(pin)) != 0;
-        bool falling = (falling_edges & BIT(pin)) != 0;
-        bool logic_high = (pdir & BIT(pin)) != 0;
-        bool logic_low = !logic_high;
-        uint32_t IRQC_field = (port->PCR[pin] >> PORT_PCR_IRQC_SHIFT) & ((1 << PORT_PCR_IRQC_WIDTH)-1);
-        bool is_new_irq = (IRQC_field == 0x8 && logic_low)
-                       || (IRQC_field == 0x9 && rising)
-                       || (IRQC_field == 0xA && falling)
-                       || (IRQC_field == 0xB && (rising || falling))
-                       || (IRQC_field == 0xC && logic_high);
-        port->PCR[pin] |= is_new_irq << PORT_PCR_ISF_SHIFT;
-    }
-    klportentry_check_irq(port);
-
-    gpio->PDOR = pdor;
-    gpio->PDIR = pdir;
-}
-
-static uint64_t klgpioentry_read(KLGPIOState *s, int port_id, hwaddr offset, unsigned size)
-{
-    KLGPIOEntry *gpio = &s->gpios[port_id];
-    switch (offset >> 2) {
+    KLGPIOState *gpio = (KLGPIOState*)opaque;
+    KLGPIOBank *bank = &gpio->banks[offset / 0x40];
+    uint32_t rel_offset = offset % 0x40;
+    switch (rel_offset >> 2) {
         case 0: // Port Data Output Register
-            return gpio->PDOR;
+            return bank->PDOR;
         case 1: // Port Set Output Register
         case 2: // Port Clear Output Register
         case 3: // Port Toggle Output Register
             return 0x00000000; // write-only
         case 4: // Port Data Input Register
-            return gpio->PDIR;
+            return bank->PDIR;
         case 5: // Port Data Direction Register
-            return gpio->PDDR;
+            return bank->PDDR;
         default:
             qemu_log_mask(LOG_GUEST_ERROR,
                       "klgpioentry_read: Bad offset 0x%x\n", (int)offset);
@@ -250,29 +257,43 @@ static uint64_t klgpioentry_read(KLGPIOState *s, int port_id, hwaddr offset, uns
     return 0xDEADBEEF;
 }
 
-static void klgpioentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64_t value, unsigned size)
+static void klgpio_set_io_vals(KLGPIOBank *bank, int bank_idx, uint32_t pdor, uint32_t pdir)
 {
-    KLGPIOEntry *gpio = &s->gpios[port_id];
+    bank->PDOR = pdor;
+    bank->PDIR = pdir;
+    
+    // trigger a read to the PORT peripheral which notifies it to update its IRQs
+    uint32_t dummy;
+    uint32_t port_base_addr = 0x40049000 + 0x1000*bank_idx;
+    uint32_t port_isfr_addr = port_base_addr+4*40;
+    cpu_physical_memory_read(port_isfr_addr, &dummy, 4);
+}
 
+static void klgpio_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+{
+    KLGPIOState *gpio = (KLGPIOState*)opaque;
+    int bank_num = offset / 0x40;
+    KLGPIOBank *bank = &gpio->banks[bank_num];
+    uint32_t rel_offset = offset % 0x40;
     uint32_t value32 = value;
-    switch (offset >> 2) {
+    switch (rel_offset >> 2) {
         case 0: // Port Data Output Register
-            klgpioentry_set_io_vals(s, port_id, value32, gpio->PDIR);
+            klgpio_set_io_vals(bank, bank_num, value32, bank->PDIR);
             break;
         case 1: // Port Set Output Register
-            klgpioentry_set_io_vals(s, port_id, gpio->PDOR | value32, gpio->PDIR);
+            klgpio_set_io_vals(bank, bank_num, bank->PDOR | value32, bank->PDIR);
             break;
         case 2: // Port Clear Output Register
-            klgpioentry_set_io_vals(s, port_id, gpio->PDOR & (~value32), gpio->PDIR);
+            klgpio_set_io_vals(bank, bank_num, bank->PDOR & (~value32), bank->PDIR);
             break;
         case 3: // Port Toggle Output Register
-            klgpioentry_set_io_vals(s, port_id, gpio->PDOR ^ value32, gpio->PDIR);
+            klgpio_set_io_vals(bank, bank_num, bank->PDOR ^ value32, bank->PDIR);
             break;
         case 4: // Port Data Input Register
-            klgpioentry_set_io_vals(s, port_id, gpio->PDOR, value32);
+            klgpio_set_io_vals(bank, bank_num, bank->PDOR, value32);
             break;
         case 5: // Port Data Direction Register
-            gpio->PDDR = value32;
+            bank->PDDR = value32;
             break;
         default:
             qemu_log_mask(LOG_GUEST_ERROR,
@@ -283,52 +304,46 @@ static void klgpioentry_write(KLGPIOState *s, int port_id, hwaddr offset, uint64
 
 
 
-static uint64_t klgpio_read(void *opaque, hwaddr offset, unsigned size)
+
+static const MemoryRegionOps klport_ops = {
+    .read = klport_read,
+    .write = klport_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
+static int klport_init(SysBusDevice *dev)
 {
-    KLGPIOState *s = (KLGPIOState*)opaque;
-    if (offset < 0x1000*NUM_PORTS)
+    KLPORTState *s = KLPORT(dev);
+
+    memory_region_init_io(&s->iomem, OBJECT(s), &klport_ops, s, TYPE_KLPORT, 0x1000);
+    sysbus_init_mmio(dev, &s->iomem);
+    sysbus_init_irq(dev, &s->irq);
+
+    // register reset values
+    int pin;
+    for (pin=0; pin<32; ++pin)
     {
-        // read one of the PORT structures
-        // each structre occupies 0x1000 bytes
-        return klportentry_read(s, offset/0x1000, offset%0x1000, size);
+        // TODO: MUX, DSE, PFE, SRC, PE, PS fields may have non-zero reset values
+        s->PCR[pin] = 0x00000000;
     }
-    else if (offset >= 0x6000 && offset <= 0x7000)
-    {
-        // read one of the GPIO structures
-        // each structure occupies 0x40 bytes
-        hwaddr rel_offset = offset-0x6000;
-        return klgpioentry_read(s, rel_offset/0x40, rel_offset%0x40, size);
-    }
-    else
-    {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "klgpio_read: Bad offset 0x%x\n", (int)offset);
-        return 0xDEADBEEF;
-    }
+
+    return 0;
 }
 
-static void klgpio_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+static void klport_class_init(ObjectClass *klass, void *data)
 {
-    KLGPIOState *s = (KLGPIOState*)opaque;
-    if (offset < 0x1000*NUM_PORTS)
-    {
-        // write one of the PORT structures
-        // each structre occupies 0x1000 bytes
-        klportentry_write(s, offset/0x1000, offset%0x1000, value, size);
-    }
-    else if (offset >= 0x6000 && offset <= 0x7000)
-    {
-        // write one of the GPIO structures
-        // each structure occupies 0x40 bytes
-        hwaddr rel_offset = offset-0x6000;
-        klgpioentry_write(s, rel_offset/0x40, rel_offset%0x40, value, size);
-    }
-    else
-    {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "klgpio_read: Bad offset 0x%x\n", (int)offset);
-    }
+    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
+
+    sdc->init = klport_init;
 }
+
+static const TypeInfo klport_info = {
+    .name = TYPE_KLPORT,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(KLPORTState),
+    .class_init = klport_class_init,
+};
+
 
 static const MemoryRegionOps klgpio_ops = {
     .read = klgpio_read,
@@ -340,26 +355,18 @@ static int klgpio_init(SysBusDevice *dev)
 {
     KLGPIOState *s = KLGPIO(dev);
 
-    // Covers 0x40049000 - 0x4004FFFF
-    memory_region_init_io(&s->iomem, OBJECT(s), &klgpio_ops, s, TYPE_KLGPIO, 0x7000);
+    memory_region_init_io(&s->iomem, OBJECT(s), &klgpio_ops, s, TYPE_KLGPIO, 0x1000);
     sysbus_init_mmio(dev, &s->iomem);
 
     // register reset values
-    int port, pin;
-    for (port=0; port<NUM_PORTS; ++port)
+    int bank;
+    for (bank=0; bank<NUM_PORTS; ++bank)
     {
-        sysbus_init_irq(dev, &s->ports[port].irq);
-        for (pin=0; pin<32; ++pin)
-        {
-            // TODO: MUX, DSE, PFE, SRC, PE, PS fields may have non-zero reset values
-            s->ports[port].PCR[pin] = 0x00000000;
-            s->gpios[port].PDOR = 0x00000000;
-            s->gpios[port].PDIR = 0x00000000;
-            s->gpios[port].PDDR = 0x00000000;
-            s->gpios[port].PDOR = 0x00000000;
-        }
+        s->banks[bank].PDOR = 0x00000000;
+        s->banks[bank].PDIR = 0x00000000;
+        s->banks[bank].PDDR = 0x00000000;
+        s->banks[bank].PDOR = 0x00000000;
     }
-
     return 0;
 }
 
@@ -377,9 +384,10 @@ static const TypeInfo klgpio_info = {
     .class_init = klgpio_class_init,
 };
 
-static void klgpio_register_type(void)
+static void klgpio_register_types(void)
 {
+    type_register_static(&klport_info);
     type_register_static(&klgpio_info);
 }
 
-type_init(klgpio_register_type)
+type_init(klgpio_register_types)
