@@ -14,7 +14,7 @@
 #define KLLPTMR(obj) OBJECT_CHECK(KLLPTMRState, (obj), TYPE_KLLPTMR)
 
 // the type of QEMU clock to use internally
- // VIRTUAL is a high-resolution monotonic counter that pauses when the machine is suspended
+// VIRTUAL is a high-resolution monotonic counter that pauses when the machine is suspended
 #define CLOCK_TYPE_QEMU QEMU_CLOCK_VIRTUAL
 
 #define CSR_TCF_SHIFT 7 // Timer Compare Flag bit index
