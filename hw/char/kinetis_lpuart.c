@@ -15,6 +15,11 @@
 // Since timing on a non-RTOS can vary wildly, we might not be able to give the guest the full
 //   time to service a UART IRQ that it would normally get, so we have to option here to disable UART overruns
 #define NO_ALLOW_OVERRUN 1
+// If desired, a \x00 character received over serial can be interpreted as a Line Break instead.
+//   note: line break != "\n" in this case - it's a term using to indicate that there's been a physical
+//   break in the Rx line, or the device at the other end has been removed.
+//   it is usually detected by the line being at a low voltage for an extended period of time.
+#define TRANSLATE_NULL_AS_LINEBREAK 1
 
 // the type of QEMU clock to use internally
 // VIRTUAL is a high-resolution monotonic counter that pauses when the machine is suspended
@@ -58,6 +63,8 @@ typedef struct KLLPUARTState {
 
 static void kllpuart_receive(void *opaque, const uint8_t *buf, int size);
 static void kllpuart_check_data_avail(KLLPUARTState *s);
+static void kllpuart_event(void *opaque, int event);
+
 
 // write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
 // returns a mask indicating which bits were changed
@@ -154,7 +161,7 @@ static void kllpuart_write(void *opaque, hwaddr offset,
     case 1: // STAT register
         // only bits 29:25 can be written
         write_masked(&s->STAT, 0x3e000000, value32);
-        write1clear(&s->STAT, 0x001FC000, value32);
+        write1clear(&s->STAT, 0xc01FC000, value32);
         qemu_log_mask(LOG_GUEST_ERROR,
             "kllpuart_write: not all STAT features are supported");
         kllpuart_check_irq(s);
@@ -216,7 +223,12 @@ static void kllpuart_check_data_avail(KLLPUARTState *s)
         }
         uint8_t chr = s->buffer[s->read_idx];
         s->read_idx = (s->read_idx+1) % BUFF_SIZE;
-        if (overrun)
+        if (chr == 0 && TRANSLATE_NULL_AS_LINEBREAK)
+        {
+            // received a NULL character; it should be interpreted as a BREAK event.
+            kllpuart_event(s, CHR_EVENT_BREAK);
+        }
+        else if (overrun)
         {
             // attempting to write a byte but the receive register is full
             // therefore set the overrun flag
