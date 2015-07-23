@@ -11,17 +11,28 @@
 
 #define TYPE_KLLPUART "kllpuart"
 #define KLLPUART(obj) OBJECT_CHECK(KLLPUARTState, (obj), TYPE_KLLPUART)
+#define BUFF_SIZE 1024 // Number of characters to buffer from actual serial device
+// Since timing on a non-RTOS can vary wildly, we might not be able to give the guest the full
+//   time to service a UART IRQ that it would normally get, so we have to option here to disable UART overruns
+#define NO_ALLOW_OVERRUN 1
+
+// the type of QEMU clock to use internally
+// VIRTUAL is a high-resolution monotonic counter that pauses when the machine is suspended
+#define CLOCK_TYPE_QEMU QEMU_CLOCK_VIRTUAL
 
 // definitions for field locations inside the registers
-#define STAT_TDRE_SHIFT 23 // Transmit Data Register Empty Flag
-#define STAT_RDRF_SHIFT 21 // Receive Data Register Full Flag
-#define STAT_OR_SHIFT   19 // Receiver Overrun Flag
+#define BAUD_LBKDIE_SHIFT 15 // Linke Bread Detect Interrupt Enable
 
-#define CTRL_ORIE_SHIFT 27 // Overrun Interrupt Enable
-#define CTRL_TIE_SHIFT  23 // Transmit Interrupt Enable
-#define CTRL_RIE_SHIFT  21 // Receiver Interrupt Enable
-#define CTRL_TE_SHIFT   19 // Transmitter Enable
-#define CTRL_RE_SHIFT   18 // Receiver Enabled
+#define STAT_LBKDIF_SHIFT 31 // Line Break Detect Flag
+#define STAT_TDRE_SHIFT   23 // Transmit Data Register Empty Flag
+#define STAT_RDRF_SHIFT   21 // Receive Data Register Full Flag
+#define STAT_OR_SHIFT     19 // Receiver Overrun Flag
+
+#define CTRL_ORIE_SHIFT   27 // Overrun Interrupt Enable
+#define CTRL_TIE_SHIFT    23 // Transmit Interrupt Enable
+#define CTRL_RIE_SHIFT    21 // Receiver Interrupt Enable
+#define CTRL_TE_SHIFT     19 // Transmitter Enable
+#define CTRL_RE_SHIFT     18 // Receiver Enabled
 
 
 typedef struct KLLPUARTState {
@@ -35,17 +46,36 @@ typedef struct KLLPUARTState {
     uint32_t DATA;
     uint32_t MATCH;
 
+    uint32_t read_idx;
+    uint32_t write_idx;
+    uint8_t buffer[BUFF_SIZE];
+
     CharDriverState *chr;
+    QEMUTimer *timer;
     qemu_irq irq;
 } KLLPUARTState;
 
 
 static void kllpuart_receive(void *opaque, const uint8_t *buf, int size);
+static void kllpuart_check_data_avail(KLLPUARTState *s);
 
 // write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
-static void write_masked(uint32_t *dest, uint32_t mask, uint32_t value)
+// returns a mask indicating which bits were changed
+static uint32_t write_masked(uint32_t *dest, uint32_t mask, uint32_t value)
 {
+    uint32_t old = *dest;
+
     *dest = (*dest & ~mask) | (value & mask);
+
+    return old ^ *dest;
+}
+
+// certain registers contain flags that are cleared by attempting to write a 1 to them.
+// These "write 1 to clear" (w1c) bits are indicated by `mask`
+// all w1c bits in mask for which write_val = 1 will cause those bits in *reg to be set to 0
+static uint32_t write1clear(uint32_t *reg, uint32_t mask, uint32_t write_val)
+{
+    return write_masked(reg, mask & write_val, 0);
 }
 
 // "overloads" of the functions in qemu/bitops.h for u32 types
@@ -66,9 +96,10 @@ static void clear_bit_u32(int bit_idx, uint32_t *dest)
 // trigger NVIC if so
 static void kllpuart_check_irq(KLLPUARTState *s)
 {
-    bool is_irq = ((s->STAT & (1 << STAT_TDRE_SHIFT)) && (s->CTRL & (1 << CTRL_TIE_SHIFT))) ||
-                 ((s->STAT & (1 << STAT_RDRF_SHIFT)) && (s->CTRL & (1 << CTRL_RIE_SHIFT))) ||
-                 ((s->STAT & (1 << STAT_OR_SHIFT))   && (s->CTRL & (1 << CTRL_ORIE_SHIFT)));
+    bool is_irq = ((s->STAT & BIT(STAT_TDRE_SHIFT))     && (s->CTRL & BIT(CTRL_TIE_SHIFT)))  ||
+                  ((s->STAT & BIT(STAT_RDRF_SHIFT))     && (s->CTRL & BIT(CTRL_RIE_SHIFT)))  ||
+                  ((s->STAT & BIT(STAT_OR_SHIFT))       && (s->CTRL & BIT(CTRL_ORIE_SHIFT))) ||
+                  ((s->STAT & BIT(STAT_LBKDIF_SHIFT))   && (s->BAUD & BIT(BAUD_LBKDIE_SHIFT)));
 
     qemu_set_irq(s->irq, is_irq);
 }
@@ -116,15 +147,22 @@ static void kllpuart_write(void *opaque, hwaddr offset,
     switch (offset >> 2)
     {
     case 0: // BAUD register
-        s->BAUD = value32;
+        s->BAUD = value32 & 0xFF0FFFFF;
+        qemu_log_mask(LOG_GUEST_ERROR,
+            "kllpuart_write: BAUD settings are not supported");
         break;
     case 1: // STAT register
         // only bits 29:25 can be written
         write_masked(&s->STAT, 0x3e000000, value32);
-        // TODO: some more bits are write-1-to-clear
+        write1clear(&s->STAT, 0x001FC000, value32);
+        qemu_log_mask(LOG_GUEST_ERROR,
+            "kllpuart_write: not all STAT features are supported");
+        kllpuart_check_irq(s);
         break;
     case 2: // CTRL register
         s->CTRL = value32;
+        qemu_log_mask(LOG_GUEST_ERROR,
+            "kllpuart_write: not all CTRL features are supported");
         // altering the IRQ mask could cause a previously masked pending IRQ to now be unmasked
         kllpuart_check_irq(s);
         break;
@@ -144,6 +182,9 @@ static void kllpuart_write(void *opaque, hwaddr offset,
         }
         break;
     case 4: // MATCH register
+        s->MATCH = value32 & 0x03FF03FF;
+        qemu_log_mask(LOG_GUEST_ERROR,
+            "kllpuart_write: MATCH settings are not supported");
         break;
 
     default:
@@ -156,35 +197,66 @@ static int kllpuart_can_receive(void *opaque)
 {
     KLLPUARTState *s = (KLLPUARTState *)opaque;
 
+    bool has_capacity = (s->read_idx+1) % BUFF_SIZE != s->write_idx;
     // TODO: follow baud settings
     bool recv_enable = (s->CTRL & BIT(CTRL_RE_SHIFT)) != 0;
-    bool recv_full = (s->STAT & BIT(STAT_RDRF_SHIFT)) != 0;
-    return recv_enable && !recv_full;
+    // bool recv_full = (s->STAT & BIT(STAT_RDRF_SHIFT)) != 0;
+    // return recv_enable && !recv_full;
+    return has_capacity && recv_enable;
+}
+
+static void kllpuart_check_data_avail(KLLPUARTState *s)
+{
+    if (s->read_idx != s->write_idx)
+    {
+        bool overrun = s->STAT & BIT(STAT_RDRF_SHIFT);
+        if (overrun && NO_ALLOW_OVERRUN) {
+            // since timing on a non-RTOS can vary wildly, simulating overruns in simulation can be erroneous
+            return;
+        }
+        uint8_t chr = s->buffer[s->read_idx];
+        s->read_idx = (s->read_idx+1) % BUFF_SIZE;
+        if (overrun)
+        {
+            // attempting to write a byte but the receive register is full
+            // therefore set the overrun flag
+            set_bit_u32(STAT_OR_SHIFT, &s->STAT);
+            kllpuart_check_irq(s);
+        }
+        else
+        {
+            // copy the character to the receive register
+            write_masked(&s->DATA, 0xFF, chr);
+            // set the Receive Data Register Full Flag
+            set_bit_u32(STAT_RDRF_SHIFT, &s->STAT);
+            kllpuart_check_irq(s);
+        }
+    }
 }
 
 static void kllpuart_receive(void *opaque, const uint8_t *buf, int size)
 {
     KLLPUARTState *s = (KLLPUARTState *)opaque;
-
-    if (s->STAT & BIT(STAT_RDRF_SHIFT))
-    {
-        // attempting to write a byte but the receive register is full
-        // therefore set the overrun flag
-        set_bit_u32(STAT_OR_SHIFT, &s->STAT);
-        kllpuart_check_irq(s);
-    }
-    else
-    {
-        // copy the character to the receive register
-        write_masked(&s->DATA, 0xFF, *buf);
-        // set the Receive Data Register Full Flag
-        set_bit_u32(STAT_RDRF_SHIFT, &s->STAT);
-        kllpuart_check_irq(s);
-    }
+    s->buffer[s->write_idx] = *buf;
+    s->write_idx = (s->write_idx+1) % BUFF_SIZE;
 }
 
 static void kllpuart_event(void *opaque, int event)
 {
+    KLLPUARTState *s = (KLLPUARTState *)opaque;
+    if (event == CHR_EVENT_BREAK)
+    {
+        // "Line Break" - equivalent to pulling the line low for an extended period of time
+        set_bit_u32(STAT_LBKDIF_SHIFT, &s->STAT);
+        kllpuart_check_irq(s);
+    }
+}
+
+static void kllpuart_timer_interrupt(void * opaque)
+{
+    KLLPUARTState *s = (KLLPUARTState *)opaque;
+    kllpuart_check_data_avail(s);
+    timer_mod_ns(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000000/9600);
 }
 
 static const MemoryRegionOps kllpuart_ops = {
@@ -203,6 +275,8 @@ static const VMStateDescription vmstate_kllpuart = {
         VMSTATE_UINT32(CTRL, KLLPUARTState),
         VMSTATE_UINT32(DATA, KLLPUARTState),
         VMSTATE_UINT32(MATCH, KLLPUARTState),
+        VMSTATE_UINT32(read_idx, KLLPUARTState),
+        VMSTATE_UINT32(write_idx, KLLPUARTState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -222,6 +296,11 @@ static void kllpuart_init(Object *obj)
     s->CTRL  = 0x00000000;
     s->DATA  = 0x00001000;
     s->MATCH = 0x00000000;
+    s->read_idx = 0;
+    s->write_idx = 0;
+
+    s->timer = timer_new_ns(CLOCK_TYPE_QEMU, kllpuart_timer_interrupt, s);
+    timer_mod_ns(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
 static void kllpuart_realize(DeviceState *dev, Error **errp)
