@@ -126,18 +126,23 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     sysbus_create_simple("klbme", 0x58000000, NULL);
     sysbus_create_simple("klbme", 0x5C000000, NULL);
 
-    // add LPUART0 to the appropriate place in physical ram & to the correct NVIC IRQ
-    // IRQ is numberd 28 in absolute table, but subtract 16 to get the external IRQ location
-    sysbus_create_simple("kllpuart", 0x40054000, pic[12]);
-
-    // add LPTMR0 to physical ram & NVIC IRQ
+    // add LPTMR0 (Low Power Timer) to physical ram & NVIC IRQ
     // IRQ is 44 in absolute table; 28 in external IRQ
     sysbus_create_simple("kllptmr", 0x40040000, pic[28]);
 
-    // add GPIOs (both PORT and GPIO control)
+    // add SIM (System Integration Module) to physical ram
+    sysbus_create_simple("klsim", 0x40047000, NULL);
+
+    // add PORT control for gpios
     // IRSs are 46 and 46 in absolute table; 30 and 31 external IRQ
     sysbus_create_simple("klport", 0x40049000, pic[30]);
     sysbus_create_simple("klport", 0x4004A000, pic[31]);
+
+    // add LPUART0 (Low Power UART) to the appropriate place in physical ram & to the correct NVIC IRQ
+    // IRQ is numberd 28 in absolute table, but subtract 16 to get the external IRQ location
+    sysbus_create_simple("kllpuart", 0x40054000, pic[12]);
+
+    // add GPIO control
     sysbus_create_simple("klgpio", 0x400FF000, NULL);
     return pic;
 }
