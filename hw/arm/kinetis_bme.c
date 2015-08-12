@@ -151,8 +151,8 @@ static void klbme_write(void *opaque, hwaddr offset,
     {
     	// decorated store bit field insert
     	// creates a mask from b and w field and only updates the masked bits with those from `value`
-    	uint32_t b = (decorated_addr & ( 0x03800000 + ((read_size-1) << 26) ))  >> 23;
-        uint32_t w = (decorated_addr & ( 0x00380000 + ((read_size-1) << 22) ))  >> 19;
+        uint32_t b = (decorated_addr & ( 0x03800000 | ((read_size-1) << 26) ))  >> 23;
+        uint32_t w = (decorated_addr & ( 0x00380000 | ((read_size != 1) << 22) ))  >> 19;
         uint32_t mask = ( (1 << (w+1)) - 1 ) << b;
 
         // offset is specified as 5 nibbles, less one bit
