@@ -140,6 +140,12 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     // IRQ is numberd 28 in absolute table, but subtract 16 to get the external IRQ location
     sysbus_create_simple("kllpuart", 0x40054000, pic[12]);
 
+    // add the Multipurpose Clock Generator Lite (MCG_Lite)
+    sysbus_create_simple("klmcglite", 0x40064000, NULL);
+
+    // add SMC (System Mode Controller)
+    sysbus_create_simple("klsmc", 0x4007E000, NULL);
+
     // add GPIO control
     sysbus_create_simple("klgpio", 0x400FF000, NULL);
     return pic;
