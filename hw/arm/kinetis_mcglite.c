@@ -5,7 +5,7 @@
  *   & appropriately dividing them
  *
  * Features lacking in this implementation:
-
+ *   Mode switches are assumed to be instantaneous
  *
  * Authored by Colin Wallace <wallace.colin.a@gmail.com>
  *
