@@ -134,7 +134,7 @@ static void sched_next_qemu_interrupt(KLLPTMRState *s)
 {
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint64_t ns_per_tick = kllptmr_ns_per_tick(s);
-    uint64_t ns_from_time_base = s->CMR * ns_per_tick;
+    uint64_t ns_from_time_base = (s->CMR+1) * ns_per_tick;
     uint64_t ns_per_overflow = 0x10000 * ns_per_tick;
 
     // the next IRQ should happen at s->time_base + ns_from_time_base + k*ns_per_overflow
