@@ -64,6 +64,7 @@ typedef struct KLLPUARTState {
 static void kllpuart_receive(void *opaque, const uint8_t *buf, int size);
 static void kllpuart_check_data_avail(KLLPUARTState *s);
 static void kllpuart_event(void *opaque, int event);
+static void kllpuart_timer_interrupt(void * opaque);
 
 
 // write `value` to `dest`, but do not affect any bit i for which mask[i] = 0.
@@ -109,6 +110,16 @@ static void kllpuart_check_irq(KLLPUARTState *s)
                   ((s->STAT & BIT(STAT_LBKDIF_SHIFT))   && (s->BAUD & BIT(BAUD_LBKDIE_SHIFT)));
 
     qemu_set_irq(s->irq, is_irq);
+}
+
+static uint32_t get_baud(KLLPUARTState *s)
+{
+    // baud = lpuart_clock / ((OSR+1) * SBR)
+    uint32_t OSR = (s->BAUD >> 24) & 0x1F;
+    uint32_t SBR = (s->BAUD) & 0x1FFF;
+    uint32_t lpuart_clock = 2000000; // TODO: calculate from MCG/OSC settings
+    //return 300;
+    return lpuart_clock / ((OSR+1) * SBR);
 }
 
 // this function is called whenever the user program reads from a register
@@ -157,6 +168,8 @@ static void kllpuart_write(void *opaque, hwaddr offset,
         s->BAUD = value32 & 0xFF0FFFFF;
         qemu_log_mask(LOG_GUEST_ERROR,
             "kllpuart_write: BAUD settings are not supported");
+        // update the timer that triggers the RX interrupt
+        kllpuart_timer_interrupt(opaque);
         break;
     case 1: // STAT register
         // only bits 29:25 can be written
@@ -205,16 +218,15 @@ static int kllpuart_can_receive(void *opaque)
     KLLPUARTState *s = (KLLPUARTState *)opaque;
 
     bool has_capacity = (s->read_idx+1) % BUFF_SIZE != s->write_idx;
-    // TODO: follow baud settings
-    bool recv_enable = (s->CTRL & BIT(CTRL_RE_SHIFT)) != 0;
-    // bool recv_full = (s->STAT & BIT(STAT_RDRF_SHIFT)) != 0;
-    // return recv_enable && !recv_full;
-    return has_capacity && recv_enable;
+    bool recv_enabled = (s->CTRL & BIT(CTRL_RE_SHIFT)) != 0;
+    return has_capacity && recv_enabled;
 }
 
 static void kllpuart_check_data_avail(KLLPUARTState *s)
 {
-    if (s->read_idx != s->write_idx)
+    bool has_data = (s->read_idx != s->write_idx);
+    bool recv_enabled = (s->CTRL & BIT(CTRL_RE_SHIFT)) != 0;
+    if (has_data && recv_enabled)
     {
         bool overrun = s->STAT & BIT(STAT_RDRF_SHIFT);
         if (overrun && NO_ALLOW_OVERRUN) {
@@ -268,7 +280,11 @@ static void kllpuart_timer_interrupt(void * opaque)
 {
     KLLPUARTState *s = (KLLPUARTState *)opaque;
     kllpuart_check_data_avail(s);
-    timer_mod_ns(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000000/9600);
+    uint32_t baud = get_baud(s);
+    if (baud)
+    {
+        timer_mod_ns(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000000000/baud);
+    }
 }
 
 static const MemoryRegionOps kllpuart_ops = {
