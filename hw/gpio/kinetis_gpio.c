@@ -20,6 +20,9 @@
 #define TYPE_KLPORT "klport"
 #define KLPORT(obj) OBJECT_CHECK(KLPORTState, (obj), TYPE_KLPORT)
 
+#define PORT_PCR_MUX_SHIFT 8 // Pin Multiplex Mode bit index
+#define PORT_PCR_MUX_WIDTH 3
+
 #define PORT_PCR_ISF_SHIFT 24 // Interrupt Status Flag bit index
 #define PORT_PCR_IRQC_SHIFT 16 // Interrupt Configuration bits
 #define PORT_PCR_IRQC_WIDTH 4
@@ -107,10 +110,12 @@ static void klport_check_irq(KLPORTState *port)
     int pin;
     for (pin=0; pin<32; ++pin)
     {
+        // determine which transitions the pin just made
         bool rising = (rising_edges & BIT(pin)) != 0;
         bool falling = (falling_edges & BIT(pin)) != 0;
         bool logic_high = (new_pdir & BIT(pin)) != 0;
         bool logic_low = !logic_high;
+        // check if the pin is enabled to trigger on IRQ on whichever transition was made
         uint32_t IRQC_field = (port->PCR[pin] >> PORT_PCR_IRQC_SHIFT) & ((1 << PORT_PCR_IRQC_WIDTH)-1);
         bool is_new_irq = (IRQC_field == 0x8 && logic_low)
                        || (IRQC_field == 0x9 && rising)
@@ -127,6 +132,26 @@ static void klport_check_irq(KLPORTState *port)
 	    is_irq |= (port->PCR[pin] & BIT(PORT_PCR_ISF_SHIFT)) != 0;
 	}
     qemu_set_irq(port->irq, is_irq);
+
+    // Check if the NMI (Non-maskable interrupt) pin is triggering an IRQ
+    // if so, this is treated as a special ARM IRQ rather than a peripheral IRQ.
+    if (port_number == 1)
+    {
+        // NMI pin is Port B pin 5.
+        uint8_t mux_mode = port->PCR[5] >> PORT_PCR_MUX_SHIFT & ((1 << PORT_PCR_MUX_WIDTH)-1);
+        bool is_muxed_as_nmi = (mux_mode == 3);
+        bool is_pin_active = (new_pdir & BIT(5)) == 0; // NMI pin is active low
+        bool is_nmi_irq = is_muxed_as_nmi && is_pin_active;
+
+        //qemu_set_irq(port->nmi_irq, is_nmi_irq);
+        // write to the arm address that triggers / clears the NMI IRQ flag
+        uint32_t addr = 0xE000E000 + 0x0D00 + 0x04;
+        uint32_t icsr_value; // value in the ARM Interrupt Control & State Register
+        // set bit 31 of icsr (NMIPENDSET)
+        cpu_physical_memory_read(addr, &icsr_value, 4);
+        write_masked(&icsr_value, 1 << 31, is_nmi_irq << 31);
+        cpu_physical_memory_write(addr, &icsr_value, 4);
+    }
 }
 
 static uint64_t klport_read(void *opaque, hwaddr offset, unsigned size)
