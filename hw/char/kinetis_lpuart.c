@@ -166,8 +166,6 @@ static void kllpuart_write(void *opaque, hwaddr offset,
     {
     case 0: // BAUD register
         s->BAUD = value32 & 0xFF0FFFFF;
-        qemu_log_mask(LOG_GUEST_ERROR,
-            "kllpuart_write: BAUD settings are not supported");
         // update the timer that triggers the RX interrupt
         kllpuart_timer_interrupt(opaque);
         break;
