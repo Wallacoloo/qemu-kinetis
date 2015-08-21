@@ -29,3 +29,5 @@ export CFLAGS="-Wno-error"
 make all
 sudo make install
 ```
+
+Note: if you run into build errors during `make all` inside config-host.h and are on a system that uses unix line-endings, try running `make clean && dos2unix config-host.mak` and then running `make` again.
