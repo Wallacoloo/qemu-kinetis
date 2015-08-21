@@ -25,7 +25,7 @@ The easy way to build this is as follows (run in a shell):
 
 ```sh
 export CFLAGS="-Wno-error"
-./configure --target-list="gnuarmeclipse-softmmu" --prefix=/opt/gnuarmeclipse-mod/qemu
+./configure --target-list="gnuarmeclipse-softmmu" --prefix=/usr/local
 make all
 sudo make install
 ```
