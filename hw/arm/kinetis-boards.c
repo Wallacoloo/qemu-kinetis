@@ -105,7 +105,7 @@ static QEMUMachine frdm_kl03z_machine = {
 
 static void frdm_kl03z_board_init(MachineState *machine)
 {
-    kinetis_board_init(machine, &frdm_kl03z_machine);
+    cm_board_greeting(machine);
     mkl03z32vfk4_mcu_init(machine);
     /* TODO: Add board inits */
 }
