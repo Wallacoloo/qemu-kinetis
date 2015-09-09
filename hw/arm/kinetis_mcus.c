@@ -147,6 +147,9 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     // add the Multipurpose Clock Generator Lite (MCG_Lite)
     sysbus_create_simple("klmcglite", 0x40064000, NULL);
 
+    // add the Low Level Wakeup Unit (LLWU)
+    sysbus_create_simple("klllwu", 0x4007C000, pic[7]);
+
     // add SMC (System Mode Controller)
     sysbus_create_simple("klsmc", 0x4007E000, NULL);
 
