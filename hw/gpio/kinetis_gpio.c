@@ -61,6 +61,7 @@ typedef struct KLGPIOState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    MemoryRegion fgpiomem;
 
     // device registers (publicly readable/writeable)
     KLGPIOBank banks[NUM_PORTS];
@@ -382,6 +383,9 @@ static int klgpio_init(SysBusDevice *dev)
 
     memory_region_init_io(&s->iomem, OBJECT(s), &klgpio_ops, s, TYPE_KLGPIO, 0x1000);
     sysbus_init_mmio(dev, &s->iomem);
+
+    memory_region_init_io(&s->fgpiomem, OBJECT(s), &klgpio_ops, s, TYPE_KLGPIO, 0x1000);
+    sysbus_init_mmio(dev, &s->fgpiomem);
 
     // register reset values
     int bank;

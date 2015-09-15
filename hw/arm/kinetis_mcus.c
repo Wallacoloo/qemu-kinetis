@@ -154,7 +154,10 @@ qemu_irq *mkl03z32vfk4_mcu_init(MachineState *machine)
     sysbus_create_simple("klsmc", 0x4007E000, NULL);
 
     // add GPIO control
-    sysbus_create_simple("klgpio", 0x400FF000, NULL);
+    SysBusDevice *gpio = OBJECT_CHECK(SysBusDevice,
+        sysbus_create_simple("klgpio", 0x400FF000, NULL), "klgpio");
+    // Map "Fast" GPIO alias
+    sysbus_mmio_map(gpio, 1, 0xF8000000);
     return pic;
 }
 
